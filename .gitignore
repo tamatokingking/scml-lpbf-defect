@@ -1,0 +1,32 @@
+# Data (too large for git)
+data/
+*.jpg
+*.jpeg
+*.png
+*.tiff
+
+# Model checkpoints
+*.pth
+*.pt
+
+# Generated results
+results/
+physics_outputs/
+pinn_outputs/
+neural_ode_outputs/
+*.npy
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
