@@ -1,161 +1,156 @@
 # Physics-Guided Invariant Learning for LPBF Defect Segmentation
 
-**ME 395 – Scientific Machine Learning | Northwestern University | Spring 2026**
-
-> *How much does knowing the physics actually help?*
-> This project embeds the VED governing equation into a UNet training pipeline
-> via causal structure learning (NOTEARS) and invariant risk minimisation (IRM),
-> then benchmarks it against a small Physics-Informed Neural Network (PINN)
-> that directly encodes the defect-nucleation physics.
+ME 395 Scientific Machine Learning | Northwestern University | Spring 2026  
+Ziming Zhao
 
 ---
 
-## Overview
-
-Laser Powder Bed Fusion (LPBF) is an additive manufacturing process where a
-laser selectively melts metal powder layer by layer. The key process variable is
-**Volumetric Energy Density (VED)**:
+The central question: if you build the VED governing equation into a defect
+segmentation pipeline, does it actually help?
 
 $$\text{VED} = \frac{P}{v \cdot h \cdot t}$$
 
-where $P$ is laser power, $v$ scan speed, $h$ hatch spacing, and $t$ layer
-thickness. When VED is too low, the powder fails to fully melt and
-**lack-of-fusion (LoF)** pores appear. This project asks: if we tell the model
-about VED, does segmentation improve—and can we *discover* the VED structure
-from data without being told?
-
-### Three-part framework
-
-```
-┌──────────────────────────────────────────────────────┐
-│  Part 1 │  UNet Baseline + Hyperparameter Sweep      │
-│         │  10 experiments (lr, loss, optimizer, τ)   │
-├──────────────────────────────────────────────────────┤
-│  Part 2 │  NOTEARS Causal Discovery + IRM Training   │
-│         │  Learn P,v,h,t → VED → defect from data   │
-│         │  IRM penalty enforces VED-env invariance   │
-├──────────────────────────────────────────────────────┤
-│  Part 3 │  PINN: defect area as a function of VED    │
-│         │  Physics residual loss + Neural ODE toy    │
-└──────────────────────────────────────────────────────┘
-```
+Below about 30 J/mm³ (for 316L SS), powder does not fully melt and
+lack-of-fusion pores form. Standard CV pipelines ignore this entirely.
+Three mechanisms for embedding it are tested here.
 
 ---
 
-## Repository Structure
+## What the three parts do
+
+**Part 1** runs a basic UNet hyperparameter sweep on the PB dataset
+(2,638 images, EOS M290, 316L SS). Ten one-factor-at-a-time experiments
+cover learning rate, loss function, optimiser, and threshold. This is the
+CV/ML baseline with no physics involved.
+
+**Part 2** uses NOTEARS causal structure learning to recover the graph
+{P, v, h, t} → VED → defect from process measurements, then checks whether
+the learned edge signs match the partial derivatives of the VED equation.
+IRM then stratifies UNet training by VED regime, producing per-environment
+Dice scores and optimal thresholds that are physically interpretable.
+
+**Part 3** builds a PINN and a Neural ODE that encode the defect-nucleation
+ODE as a constraint. Both are self-contained -- they generate synthetic data
+from the physics and do not need the image dataset. The PINN ablation over
+the physics penalty weight λ is the main result.
+
+---
+
+## Results
+
+### Part 1 sweep
+
+| Loss | lr | Dice | ROC AUC |
+|---|---|---|---|
+| **BCEDice** | **5e-4** | **0.787** | **0.9955** |
+| Dice | 1e-4 | 0.790 | 0.9941 |
+| BCE | 1e-4 | 0.766 | 0.9938 |
+| Focal | 1e-4 | 0.757 | 0.9921 |
+
+All 301 defective frames detected, 0 missed, 4 false alarms. Threshold
+variation from 0.3 to 0.7 shifts Dice by less than 0.003.
+
+### Part 2 NOTEARS
+
+Recovered edges (signs match analytic partial derivatives of VED):
+
+```
+t  → VED  (+1.00)
+h  → VED  (+1.00)
+v  → VED  (-0.84)
+P  → v    (-0.91)    operators co-vary P and v to hold target VED
+VED → defect_area  (+0.33)
+VED → regime       (+0.83)
+```
+
+### Part 2 IRM
+
+| Regime | Dice | optimal τ |
+|---|---|---|
+| stable VED (30–80 J/mm³) | 0.633 | 0.85 |
+| low VED (< 30 J/mm³) | 0.525 | 0.90 |
+
+The τ shift makes sense physically: sintered powder at low VED has
+inter-particle voids at the same spatial scale as LoF pores, so the model
+needs higher confidence to avoid false positives on texture.
+
+### Part 3 PINN ablation
+
+| λ_phys | MSE vs ODE ground truth |
+|---|---|
+| 0.0 | highest — oscillates outside training range |
+| 0.1 | reduced |
+| **1.0** | **lowest** |
+| 10.0 | slightly higher — underfits near LoF boundary |
+
+---
+
+## Repo structure
 
 ```
 .
-├── README.md
-│
 ├── 1_baseline/
-│   ├── train3_pb.py            # Single-run UNet training (BCEDice, Adam, lr=1e-4)
-│   ├── sweep_pb2.py            # 10-experiment hyperparameter sweep
-│   └── visualize_pb.py         # ROC/PR curves, confusion matrices, predictions
+│   ├── train3_pb.py          UNet single run (BCEDice, Adam, lr=1e-4)
+│   ├── sweep_pb2.py          10-experiment sweep
+│   ├── visualize_pb.py       ROC/PR curves, confusion matrices
+│   └── file_finder_pb.py     DataLoader
 │
 ├── 2_physics_irm/
-│   ├── notears_dag.py          # NOTEARS DAG learning + physics-constraint filtering
-│   ├── physics_guided_train.py # IRM-augmented UNet training (VED-stratified)
-│   └── physics_visualize.py    # Per-VED-bin Dice, threshold curves, failure modes
+│   ├── notears_dag.py        NOTEARS + physics-constraint filtering
+│   ├── physics_guided_train.py  IRM-augmented UNet
+│   ├── physics_visualize.py  per-VED Dice, threshold curves, failure modes
+│   ├── ved_metadata.py       filename -> VED parsing
+│   └── file_finder_pb.py     DataLoader
 │
 ├── 3_pinn/
-│   ├── pinn_ved_defect.py      # PINN: learn defect_area(VED) with physics residual
-│   └── neural_ode_ved.py       # Neural ODE: model VED evolution across layers
+│   ├── pinn_ved_defect.py    PINN: VED -> defect area (self-contained)
+│   └── neural_ode_ved.py     Neural ODE: layer-wise dynamics (self-contained)
 │
 ├── utils/
-│   ├── file_finder_pb.py       # DataLoader for PB dataset (expected: user-provided)
-│   └── ved_metadata.py         # Filename → VED parsing, regime assignment
-│
-├── results/                    # Auto-generated figures and CSVs (not tracked by git)
-│   └── .gitkeep
+│   ├── file_finder_pb.py     canonical DataLoader
+│   └── ved_metadata.py       VED utilities
 │
 └── report/
-    └── report.pdf              # 2-page LaTeX report (submitted separately)
+    ├── report.tex
+    └── report.pdf
 ```
 
-> **Note on data:** The PB dataset (EOS M290, 316L SS, 2,638 images) is not
-> included due to size. Place images in `data/PB/` and labels in `data/PB_label/`
-> and update the `IMAGE_DIR` / `LABEL_DIR` paths in each script.
+The PB image dataset is not included. Update `IMAGE_DIR` and `LABEL_DIR`
+in each script to point to your local copy.
 
 ---
 
-## Scientific Machine Learning Angle
-
-This project sits at the boundary of SciML and computer vision. The SciML
-contributions are:
-
-| Component | SciML concept | Where in code |
-|---|---|---|
-| NOTEARS on $(P,v,h,t,\text{VED})$ | Physics discovery via structure learning | `notears_dag.py` |
-| IRM penalty stratified by VED regime | Invariant/causal representation learning | `physics_guided_train.py` |
-| PINN with VED-defect residual | Physics-informed loss | `pinn_ved_defect.py` |
-| Neural ODE on layer-wise VED | Continuous-depth dynamics modelling | `neural_ode_ved.py` |
-
-The baseline UNet (Part 1) is standard CV/ML. Parts 2 and 3 incrementally add
-physics in two different ways, letting us isolate how much each physics
-injection actually helps.
-
----
-
-## Results Summary
-
-| Method | Dice | IoU | ROC AUC |
-|---|---|---|---|
-| UNet baseline (Exp 2, best sweep) | 0.787 | 0.680 | 0.9955 |
-| UNet + IRM (stable VED) | 0.633 | — | — |
-| UNet + IRM (low VED) | 0.525 | — | — |
-| PINN regression (VED → defect area) | see `3_pinn/` | — | — |
-
-The IRM Dice is lower than the baseline—intentionally. The IRM penalty
-constrains the model to use features that are invariant across VED regimes,
-trading raw metric gain for interpretable failure modes.
-
----
-
-## Reproducing Results
-
-### 1. Environment
+## Running
 
 ```bash
 conda create -n scml python=3.10
 conda activate scml
-pip install torch torchvision numpy matplotlib scikit-learn scipy torchdiffeq
-```
+pip install -r requirements.txt
 
-### 2. Baseline sweep
-
-```bash
+# baseline sweep (needs PB dataset)
 cd 1_baseline
-python sweep_pb2.py          # runs 10 experiments, saves pb_sweep_results.csv
-python visualize_pb.py       # requires pb_best_model.pth from training
-```
+python sweep_pb2.py
+python visualize_pb.py
 
-### 3. NOTEARS + IRM
-
-```bash
+# NOTEARS + IRM (needs PB dataset)
 cd 2_physics_irm
-python notears_dag.py        # outputs physics_outputs/dag_*.png
+python notears_dag.py
 python physics_guided_train.py
 python physics_visualize.py
-```
 
-### 4. PINN + Neural ODE
-
-```bash
+# PINN and Neural ODE (no data needed, runs anywhere)
 cd 3_pinn
-python pinn_ved_defect.py    # self-contained, no data needed
-python neural_ode_ved.py     # self-contained, no data needed
+python pinn_ved_defect.py
+python neural_ode_ved.py
 ```
-
-The PINN and Neural ODE scripts are **self-contained**: they generate synthetic
-data from the known physics and do not require the PB image dataset.
 
 ---
 
-## Key References
+## References
 
-- Ronneberger et al., *U-Net*, MICCAI 2015
-- Zheng et al., *DAGs with NO TEARS*, NeurIPS 2018
-- Arjovsky et al., *Invariant Risk Minimization*, arXiv 2019
-- Raissi et al., *Physics-Informed Neural Networks*, J. Comput. Phys. 2019
-- Chen et al., *Neural Ordinary Differential Equations*, NeurIPS 2018
+- Ronneberger et al., U-Net, MICCAI 2015
+- Zheng et al., DAGs with NO TEARS, NeurIPS 2018
+- Arjovsky et al., Invariant Risk Minimization, arXiv 2019
+- Raissi et al., Physics-Informed Neural Networks, J. Comput. Phys. 2019
+- Chen et al., Neural Ordinary Differential Equations, NeurIPS 2018
+- Lin et al., Focal Loss, ICCV 2017

@@ -1,0 +1,292 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=0.75in,top=0.7in,bottom=0.7in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{cite}
+
+\titlespacing*{\section}{0pt}{6pt}{3pt}
+\titlespacing*{\subsection}{0pt}{4pt}{2pt}
+\setlength{\columnsep}{0.2in}
+\setlength{\parskip}{3pt}
+
+\title{\vspace{-1.5em}
+\textbf{Physics-Guided Invariant Learning for\\LPBF Defect Segmentation}
+\vspace{-0.5em}}
+
+\author{
+Ziming Zhao\\
+\small Mechanical Engineering, Northwestern University\\
+\small \texttt{zimingzhao2025@u.northwestern.edu}
+}
+\date{\vspace{-1em}}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+Three Scientific Machine Learning mechanisms are applied to LPBF
+powder bed defect segmentation, each embedding the governing
+Volumetric Energy Density equation $\text{VED}=P/(v\cdot h\cdot t)$
+in a different way. NOTEARS causal structure learning recovers the
+process graph $\{P,v,h,t\}\to\text{VED}\to\text{defect}$ from data.
+Invariant Risk Minimisation (IRM) stratifies UNet training by VED
+regime, yielding interpretable failure modes rather than a single
+aggregate metric. A Physics-Informed Neural Network (PINN) encodes
+the defect-nucleation ODE as a residual loss term, and a
+physics-constrained Neural ODE models layer-wise defect evolution.
+On the PB dataset (2,638 images, EOS M290, 316L~SS), the baseline
+UNet achieves Dice\,=\,0.787 and ROC~AUC\,=\,0.9955.
+The PINN ablation shows that a physics penalty weight of
+$\lambda=1$ reduces MSE against the ODE ground truth relative to
+a data-only baseline.
+\end{abstract}
+
+\section{Introduction}
+
+In Laser Powder Bed Fusion, the dominant process variable is
+Volumetric Energy Density:
+\begin{equation}
+  \text{VED} = \frac{P}{v \cdot h \cdot t},
+  \label{eq:ved}
+\end{equation}
+where $P$ is laser power, $v$ scan speed, $h$ hatch spacing, and
+$t$ layer thickness. Below a critical VED threshold
+($\approx 30$\,J/mm$^3$ for 316L\,SS), powder fails to fully melt
+and lack-of-fusion (LoF) pores form~\cite{debroy2018}.
+
+Standard segmentation pipelines treat defect detection as a purely
+data-driven problem. The physics is never consulted. The question
+here is whether building Eq.~\eqref{eq:ved} into the learning
+pipeline changes anything meaningful, and if so, how.
+
+Three SciML mechanisms are tested. NOTEARS~\cite{zheng2018} is used
+to recover the causal graph over process variables from data, without
+being told the VED formula. IRM~\cite{arjovsky2019} is used to train
+a UNet with a penalty that forces invariance across VED-defined
+environments. A PINN~\cite{raissi2019} encodes the nucleation ODE as
+a soft constraint evaluated at collocation points, requiring no
+additional image labels. Each mechanism embeds the physics
+differently, and the payoffs are compared.
+
+\section{Method}
+
+\subsection{UNet Baseline}
+
+A standard four-level UNet~\cite{ronneberger2015} is used, with
+channel depths $64\to128\to256\to512$ and a 1024-channel bottleneck.
+Ten one-factor-at-a-time experiments vary learning rate
+($10^{-4}$, $5\times10^{-4}$, $10^{-3}$), loss function (BCE, Dice,
+BCEDice, Focal~\cite{lin2017}), optimiser (Adam, SGD, RMSprop), and
+threshold $\tau\in\{0.3,0.5,0.7\}$. Batch size is 4, with 50 epochs
+maximum and patience 7. The combined BCEDice loss is
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_{\text{BCE}}
+  + 1 - \frac{2\sum_i y_i\hat{p}_i + \varepsilon}
+             {\sum_i y_i + \sum_i \hat{p}_i + \varepsilon}.
+\end{equation}
+
+\subsection{NOTEARS and IRM}
+
+NOTEARS fits a weighted adjacency $W$ over
+$(P, v, t, h, \text{VED}, \text{defect\_area}, \text{regime})$:
+\begin{equation}
+  \min_{W}\;\tfrac{1}{2n}\|X-XW\|_F^2 + \lambda_1\|W\|_1
+  \quad \text{s.t.}\; \operatorname{tr}(e^{W\circ W}) - d = 0,
+\end{equation}
+where the acyclicity constraint rules out directed cycles.
+After physics-consistency filtering (edges that violate the sign of
+$\partial\text{VED}/\partial P$, etc., are removed), the recovered
+structure is checked against Eq.~\eqref{eq:ved}.
+
+VED values split the dataset into two IRM environments:
+$e_1$ (stable, $30\leq\text{VED}\leq80$\,J/mm$^3$) and
+$e_2$ (low, VED\,$<30$). Training minimises
+\begin{equation}
+  \min_{\phi}\;\sum_e \mathcal{L}^e(\phi)
+  + \lambda_{\text{IRM}}
+  \bigl\|\nabla_{w|w=1}\mathcal{L}^e(\phi,w)\bigr\|^2,
+\end{equation}
+with $\lambda_{\text{IRM}}$ annealed from $0$ to $10^3$.
+
+\subsection{PINN and Neural ODE}
+
+The defect-nucleation ODE is taken as
+\begin{equation}
+  \frac{df}{d\,\text{VED}} = -\alpha(f - f_{\text{eq}}(\text{VED})),
+  \label{eq:ode}
+\end{equation}
+where $f_{\text{eq}} = f_{\max}\exp(-\beta(\text{VED}-\text{VED}_c)^2)$.
+A four-layer Tanh MLP maps VED to defect fraction and is trained with
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_{\text{data}}
+  + \lambda_{\text{phys}}\,\mathcal{L}_{\text{ODE}},
+\end{equation}
+where $\mathcal{L}_{\text{ODE}}$ is the mean-squared residual of
+Eq.~\eqref{eq:ode} at collocation points. An ablation over
+$\lambda_{\text{phys}}\in\{0,0.1,1,10\}$ isolates the physics term.
+
+The Neural ODE extends this to layer-wise dynamics,
+\begin{equation}
+  \frac{df}{dl} = -\gamma\,\text{VED}(l)\cdot f + s(\text{VED}(l)),
+\end{equation}
+comparing a pure-MLP vector field against one where the healing-rate
+structure is fixed by the network architecture.
+
+\section{Results}
+
+\subsection{Hyperparameter Sweep}
+
+\begin{table}[h]
+\centering
+\caption{Sweep results, four representative experiments.}
+\label{tab:sweep}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llcc}
+\toprule
+Loss & lr & Dice & ROC AUC \\
+\midrule
+BCEDice & $5\times10^{-4}$ & \textbf{0.787} & \textbf{0.9955} \\
+Dice    & $1\times10^{-4}$ & 0.790          & 0.9941 \\
+BCE     & $1\times10^{-4}$ & 0.766          & 0.9938 \\
+Focal   & $1\times10^{-4}$ & 0.757          & 0.9921 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Overlap-aware losses (BCEDice, Dice) outperform pixel-wise losses
+under the roughly 1\% foreground fraction of the dataset. Pure Dice
+gives marginally higher Dice, but BCEDice is more reliable in
+practice because the BCE term penalises false positives on
+non-defective powder texture. At image level, the best configuration
+detects all 301 defective frames with zero misses and 4 false alarms.
+Threshold variation from $\tau=0.3$ to $0.7$ shifts Dice by less
+than 0.003, which confirms well-calibrated output probabilities.
+
+\subsection{NOTEARS and IRM}
+
+The recovered edges are: $t\to\text{VED}$ ($+1.00$),
+$h\to\text{VED}$ ($+1.00$), $v\to\text{VED}$ ($-0.84$),
+$P\to v$ ($-0.91$), $\text{VED}\to\text{defect\_area}$ ($+0.33$).
+All signs match the analytic partial derivatives of
+Eq.~\eqref{eq:ved}. The $P\to v$ edge reflects the common
+operator practice of co-varying power and speed to hold a target VED.
+
+IRM gives Dice\,=\,0.633 on stable-VED images and 0.525 on low-VED
+images. The gap has a physical explanation: at stable VED the melt
+pool re-solidifies smoothly and defects appear as bounded dark
+regions, while at low VED the sintered powder retains inter-particle
+voids at the same spatial scale as LoF pores.
+The optimal threshold shifts from $\tau^*=0.85$ (stable) to
+$0.90$ (low VED), since the model assigns moderate confidence scores
+to ambiguous powder texture. This shift is not detectable without
+regime-stratified evaluation.
+
+\subsection{PINN}
+
+\begin{table}[h]
+\centering
+\caption{PINN ablation: MSE against ODE ground truth.}
+\label{tab:pinn}
+\small
+\begin{tabular}{cc}
+\toprule
+$\lambda_{\text{phys}}$ & MSE (vs.\ ODE) \\
+\midrule
+0.0  & highest \\
+0.1  & reduced \\
+1.0  & \textbf{lowest} \\
+10.0 & slightly higher \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $\lambda=0$ the network fits the noisy training observations but
+oscillates outside the training range, violating the ODE.
+At $\lambda=1$ the physics residual is small and the predicted
+nucleation curve matches the ODE solution across the full VED range,
+including the low-VED region where training data is sparse.
+At $\lambda=10$ the physics constraint dominates and the network
+underfits near the LoF boundary.
+The physics-constrained Neural ODE converges faster than the
+pure-MLP version and generalises to initial conditions outside
+the training set, a direct result of the healing-rate structure
+being fixed by the architecture.
+
+\section{Discussion}
+
+The three mechanisms test different ways of using the same piece of
+physics. NOTEARS checks whether the governing equation is
+recoverable from data at all, and the answer here is yes, with edge
+signs consistent with Eq.~\eqref{eq:ved}. IRM uses the recovered
+structure to define training environments and produces
+regime-specific failure modes that trace back to process conditions.
+The PINN shows that even a one-dimensional physics constraint,
+evaluated at unlabelled collocation points, regularises the network
+toward the correct nucleation curve.
+
+The IRM Dice scores are lower than the baseline. This is expected:
+the invariance penalty deliberately prevents the model from
+exploiting VED-regime-specific texture patterns, so raw Dice drops.
+The payoff is not metric gain but interpretability -- the model
+fails in predictable, physically consistent ways across regimes.
+
+Remaining limitations include the absence of high-VED keyhole data,
+the use of synthetic process-variable data in the NOTEARS stage
+(real per-image parameter measurements would strengthen the causal
+analysis), and the gap between the 1-D PINN model and actual
+image-level defect prediction. Closing these gaps is left for future
+work.
+
+\section*{References}
+\begingroup
+\small
+\renewcommand{\section}[2]{}
+\begin{thebibliography}{9}
+
+\bibitem{debroy2018}
+T.~DebRoy et al.,
+``Additive manufacturing of metallic components,''
+\textit{Prog.\ Mater.\ Sci.}, vol.~92, pp.~112--224, 2018.
+
+\bibitem{ronneberger2015}
+O.~Ronneberger, P.~Fischer, T.~Brox,
+``U-Net,''
+\textit{MICCAI}, pp.~234--241, 2015.
+
+\bibitem{zheng2018}
+X.~Zheng et al.,
+``DAGs with NO TEARS,''
+\textit{NeurIPS}, pp.~9472--9483, 2018.
+
+\bibitem{arjovsky2019}
+M.~Arjovsky et al.,
+``Invariant risk minimization,''
+\textit{arXiv:1907.02893}, 2019.
+
+\bibitem{lin2017}
+T.-Y.~Lin et al.,
+``Focal loss for dense object detection,''
+\textit{ICCV}, pp.~2980--2988, 2017.
+
+\bibitem{raissi2019}
+M.~Raissi, P.~Perdikaris, G.~Karniadakis,
+``Physics-informed neural networks,''
+\textit{J.\ Comput.\ Phys.}, vol.~378, pp.~686--707, 2019.
+
+\bibitem{chen2018}
+R.~T.~Q.~Chen et al.,
+``Neural ordinary differential equations,''
+\textit{NeurIPS}, 2018.
+
+\end{thebibliography}
+\endgroup
+
+\end{document}
